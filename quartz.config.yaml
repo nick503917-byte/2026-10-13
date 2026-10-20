@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=./quartz/plugins/quartz-plugins.schema.json
 configuration:
-  pageTitle: 整合筆記 2026 10 13
+  pageTitle: 問答知識庫 2026 10 20
   pageTitleSuffix: ""
   enableSPA: true
   enablePopovers: true

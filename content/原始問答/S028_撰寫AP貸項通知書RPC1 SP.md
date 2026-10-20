@@ -1,0 +1,1606 @@
+# 撰寫AP貸項通知書RPC1 SP
+
+來源編號：S028  
+聊天 ID：`019fa2a5-c787-77e2-b0d8-89fa1c9dfc27`  
+聊天起始日期（台北）：2026-07-27  
+保存位置：一般本機紀錄  
+問答段落：12
+
+> 以下為當時的提問與回答，已去除工具呼叫、推理及環境注入資訊；不代表回答已重新查證或操作已完成。圖片與非文字附件未嵌入，原成果連結可能仍指向原電腦位置。
+
+<a id="q1"></a>
+
+## S028-Q001｜AP貸項通知書 表身RPC1 列裡面有一個不含數量過帳 NoInvtryMv 我想寫SP 如果表身列有多個項目 如果有勾一個 就全部都要勾 如果沒有 則全部都不勾
+
+日期：2026-07-27
+
+**你的提問**
+
+AP貸項通知書 表身RPC1 列裡面有一個不含數量過帳 NoInvtryMv 我想寫SP 
+
+如果表身列有多個項目 如果有勾一個 就全部都要勾 如果沒有 則全部都不勾
+
+**當時回答**
+
+可以在 `SBO_SP_TransactionNotification` 驗證：同一張 AP 貸項通知書的 `RPC1.NoInvtryMv` 必須全部一致，只要有些勾、有些沒勾，就禁止新增或更新。
+
+AP 貸項通知書的 Object Type 是 `19`。以下為 SQL Server 版本：
+
+```sql
+IF @object_type = '19'
+   AND @transaction_type IN ('A', 'U')
+BEGIN
+    IF EXISTS
+    (
+        SELECT 1
+        FROM RPC1
+        WHERE DocEntry = CONVERT(INT, @list_of_cols_val_tab_del)
+        GROUP BY DocEntry
+        HAVING COUNT(DISTINCT ISNULL(NoInvtryMv, 'N')) > 1
+    )
+    BEGIN
+        SET @error = -19001
+        SET @error_message = N'不含數量過帳必須全部勾選或全部不勾選，請檢查表身資料。'
+    END
+END
+```
+
+請把這段放在 `SBO_SP_TransactionNotification` 最後面的：
+
+```sql
+SELECT @error, @error_message
+```
+
+之前。
+
+判斷邏輯是：
+
+- 全部为 `Y`：允許過帳
+- 全部为 `N`：允許過帳
+- 同時存在 `Y` 與 `N`：禁止過帳並顯示錯誤
+
+如果你的需求是「使用者只勾其中一列，系統自動幫其他列全部勾起來」，不建議在 `TransactionNotification` 裡直接 `UPDATE RPC1`，因為直接修改 SAP B1 系統資料表可能造成資料不一致，也不受 SAP 支援。這種自動連動應透過 SAP B1 Add-on/UI API 實作；SP 比較適合做上述的過帳驗證。
+
+---
+
+<a id="q2"></a>
+
+## S028-Q002｜對 我只是要資料驗證
+
+日期：2026-07-27
+
+**你的提問**
+
+對 我只是要資料驗證
+
+**當時回答**
+
+了解，那用 `SBO_SP_TransactionNotification` 做資料驗證最合適。
+
+```sql
+-- AP 貸項通知書：表身「不含數量過帳」必須全部一致
+IF @object_type = '19'
+   AND @transaction_type IN ('A', 'U')
+BEGIN
+    IF EXISTS
+    (
+        SELECT 1
+        FROM RPC1
+        WHERE DocEntry = TRY_CONVERT(INT, @list_of_cols_val_tab_del)
+        GROUP BY DocEntry
+        HAVING COUNT(DISTINCT ISNULL(NoInvtryMv, 'N')) > 1
+    )
+    BEGIN
+        SET @error = -19001
+        SET @error_message = N'「不含數量過帳」必須全部勾選或全部不勾選，請檢查表身資料。'
+    END
+END
+```
+
+將程式放在 SP 最後這行之前：
+
+```sql
+SELECT @error, @error_message
+```
+
+驗證結果：
+
+- 全部勾選：通過
+- 全部未勾選：通過
+- 部分勾選、部分未勾選：阻止新增或更新
+- 僅有一個表身項目：通過
+
+---
+
+<a id="q3"></a>
+
+## S028-Q003｜SQL／程式碼調整與說明
+
+日期：2026-07-27
+
+**你的提問**
+
+IF @object_type = '19'
+   AND @transaction_type IN ('A', 'U')
+BEGIN
+    IF EXISTS
+    (
+        SELECT 1
+        FROM RPC1
+        WHERE DocEntry = CONVERT(INT, @list_of_cols_val_tab_del)
+        GROUP BY DocEntry
+        HAVING COUNT(DISTINCT ISNULL(NoInvtryMv, 'N')) > 1
+    )
+    BEGIN
+        SET @error = -19001
+        SET @error_message = N'不含數量過帳必須全部勾選或全部不勾選，請檢查表身資料。'
+    END
+END
+
+可以給我這段的解析嗎
+
+**當時回答**
+
+這段程式放在 SAP Business One 的 `SBO_SP_TransactionNotification` 中，用來驗證 AP 貸項通知書的所有表身列，其「不含數量過帳」是否一致。
+
+```sql
+IF @object_type = '19'
+   AND @transaction_type IN ('A', 'U')
+```
+
+這是判斷執行時機：
+
+- `@object_type = '19'`：目前處理的單據是 AP 貸項通知書。
+- `@transaction_type = 'A'`：新增單據。
+- `@transaction_type = 'U'`：更新單據。
+- `IN ('A', 'U')`：只有新增或更新 AP 貸項通知書時才執行驗證。
+
+---
+
+```sql
+IF EXISTS
+(
+    SELECT 1
+    FROM RPC1
+```
+
+- `RPC1` 是 AP 貸項通知書的表身資料表。
+- `IF EXISTS` 用來判斷括號內的查詢是否有找到資料。
+- `SELECT 1` 只是用來判斷資料是否存在，數字 `1` 沒有其他特殊意義。
+
+---
+
+```sql
+WHERE DocEntry = CONVERT(INT, @list_of_cols_val_tab_del)
+```
+
+只檢查目前正在新增或更新的那張 AP 貸項通知書。
+
+- `DocEntry`：單據內部編號。
+- `@list_of_cols_val_tab_del`：SAP 傳入目前單據的主鍵值。
+- 這個參數是字串型別，所以用 `CONVERT(INT, ...)` 轉成整數後，再跟 `RPC1.DocEntry` 比較。
+
+例如目前處理的單據 `DocEntry = 1234`，實際條件相當於：
+
+```sql
+WHERE DocEntry = 1234
+```
+
+---
+
+```sql
+GROUP BY DocEntry
+```
+
+把同一張單據的表身資料歸成一組，讓下一行可以針對整張單據判斷。
+
+例如表身有三列：
+
+| DocEntry | LineNum | NoInvtryMv |
+|---:|---:|:---:|
+| 1234 | 0 | Y |
+| 1234 | 1 | Y |
+| 1234 | 2 | N |
+
+這三列會被視為同一組。
+
+---
+
+```sql
+HAVING COUNT(DISTINCT ISNULL(NoInvtryMv, 'N')) > 1
+```
+
+這一行是主要的驗證邏輯。
+
+先看內層：
+
+```sql
+ISNULL(NoInvtryMv, 'N')
+```
+
+如果 `NoInvtryMv` 是 `NULL`，就將它視為 `N`：
+
+- `Y`：有勾選「不含數量過帳」
+- `N`：沒有勾選
+- `NULL`：視為沒有勾選
+
+接著：
+
+```sql
+DISTINCT ISNULL(NoInvtryMv, 'N')
+```
+
+取得不重複的值。
+
+如果三列表身是：
+
+```text
+Y、Y、Y
+```
+
+不重複的值只有：
+
+```text
+Y
+```
+
+如果三列表身是：
+
+```text
+N、N、N
+```
+
+不重複的值只有：
+
+```text
+N
+```
+
+如果三列表身是：
+
+```text
+Y、Y、N
+```
+
+不重複的值有：
+
+```text
+Y、N
+```
+
+接著計算不同值的數量：
+
+```sql
+COUNT(DISTINCT ISNULL(NoInvtryMv, 'N'))
+```
+
+| 表身内容 | 不同值數量 | 結果 |
+|---|---:|---|
+| `Y、Y、Y` | 1 | 通過 |
+| `N、N、N` | 1 | 通過 |
+| `Y、Y、N` | 2 | 不通過 |
+| `Y、N、N` | 2 | 不通過 |
+| 只有一列 `Y` | 1 | 通過 |
+| 只有一列 `N` | 1 | 通過 |
+
+最後：
+
+```sql
+> 1
+```
+
+代表同一張單據同時存在兩種以上的值，也就是有些列勾選、有些列沒勾選。
+
+---
+
+```sql
+BEGIN
+    SET @error = -19001
+    SET @error_message =
+        N'不含數量過帳必須全部勾選或全部不勾選，請檢查表身資料。'
+END
+```
+
+查到不一致的資料時，設定 SAP B1 的錯誤資訊：
+
+- `@error = -19001`：自訂錯誤代碼；只要不是 `0`，SAP 就會阻止交易。
+- `@error_message`：顯示給使用者看的錯誤訊息。
+- 字串前面的 `N` 表示 Unicode 字串，避免中文出現亂碼。
+
+整體邏輯可以簡化理解為：
+
+```text
+目前是新增或更新 AP 貸項通知書嗎？
+    ↓ 是
+取得目前單據的全部 RPC1 表身列
+    ↓
+NoInvtryMv 是否同時存在 Y 與 N？
+    ↓ 是
+回傳錯誤，阻止新增或更新
+```
+
+因此，這段只做資料驗證，不會自動修改任何表身資料。
+
+---
+
+<a id="q4"></a>
+
+## S028-Q004｜HAVING COUNT(DISTINCT ISNULL(NoInvtryMv, 'N')) > 1這段不懂
+
+日期：2026-07-27
+
+**你的提問**
+
+HAVING COUNT(DISTINCT ISNULL(NoInvtryMv, 'N')) > 1這段不懂
+
+**當時回答**
+
+這行可以拆成三層理解：
+
+```sql
+HAVING COUNT(DISTINCT ISNULL(NoInvtryMv, 'N')) > 1
+```
+
+它的意思是：
+
+> 同一張單據的 `NoInvtryMv` 如果出現超過一種值，就判定為不一致。
+
+### 第一層：處理空值
+
+```sql
+ISNULL(NoInvtryMv, 'N')
+```
+
+若欄位是 `NULL`，把它當成 `N`。
+
+| 原始值 | 處理後 |
+|---|---|
+| `Y` | `Y` |
+| `N` | `N` |
+| `NULL` | `N` |
+
+### 第二層：只保留不同的值
+
+```sql
+DISTINCT ISNULL(NoInvtryMv, 'N')
+```
+
+`DISTINCT` 是去除重複。
+
+例如：
+
+```text
+原本：Y、Y、Y
+去重：Y
+```
+
+```text
+原本：N、N、N
+去重：N
+```
+
+```text
+原本：Y、Y、N
+去重：Y、N
+```
+
+### 第三層：計算有幾種值
+
+```sql
+COUNT(DISTINCT ISNULL(NoInvtryMv, 'N'))
+```
+
+| 表身資料 | 去除重複後 | COUNT |
+|---|---|---:|
+| `Y、Y、Y` | `Y` | 1 |
+| `N、N、N` | `N` | 1 |
+| `Y、Y、N` | `Y、N` | 2 |
+| `Y、N、N` | `Y、N` | 2 |
+
+最後的：
+
+```sql
+> 1
+```
+
+就是判斷種類是否超過一種：
+
+- `COUNT = 1`：全部相同，驗證通過
+- `COUNT > 1`：同時有 `Y` 和 `N`，驗證失敗
+
+所以整行可以用白話表示為：
+
+```text
+如果表身的「不含數量過帳」同時存在勾選和未勾選，就抓出這張單據。
+```
+
+`HAVING` 是在 `GROUP BY DocEntry` 分組完成後，針對整張單據的那一組表身資料進行判斷。
+
+---
+
+<a id="q5"></a>
+
+## S028-Q005｜HAVING 的意思
+
+日期：2026-07-27
+
+**你的提問**
+
+HAVING 的意思
+
+**當時回答**
+
+`HAVING` 是用來篩選「分組後的結果」。
+
+你前面有：
+
+```sql
+GROUP BY DocEntry
+```
+
+意思是把相同 `DocEntry` 的表身資料分成一組；接著 `HAVING` 再判斷這一組是否符合條件：
+
+```sql
+HAVING COUNT(DISTINCT ISNULL(NoInvtryMv, 'N')) > 1
+```
+
+白話就是：
+
+> 只留下 `NoInvtryMv` 出現超過一種值的單據。
+
+### `WHERE` 和 `HAVING` 的差別
+
+- `WHERE`：在分組前，篩選「每一筆資料」
+- `HAVING`：在分組後，篩選「整個群組」
+
+以這段為例：
+
+```sql
+SELECT DocEntry
+FROM RPC1
+WHERE DocEntry = 1234
+GROUP BY DocEntry
+HAVING COUNT(DISTINCT ISNULL(NoInvtryMv, 'N')) > 1
+```
+
+執行順序可理解成：
+
+1. `WHERE DocEntry = 1234`  
+   先取出單據 1234 的所有表身列。
+
+2. `GROUP BY DocEntry`  
+   將單據 1234 的表身列歸成一組。
+
+3. `HAVING ... > 1`  
+   判斷這一組是否同時存在 `Y` 和 `N`。
+
+例如：
+
+```text
+DocEntry 1234：Y、Y、N
+```
+
+去除重複後是：
+
+```text
+Y、N
+```
+
+數量為 `2`，符合：
+
+```sql
+HAVING 2 > 1
+```
+
+所以這張單據會被查出來，接著觸發錯誤。
+
+之所以不能寫成下面這樣：
+
+```sql
+WHERE COUNT(...) > 1
+```
+
+是因為 `COUNT()` 是分組完成後才能計算的彙總結果，因此需要使用 `HAVING`。
+
+---
+
+<a id="q6"></a>
+
+## S028-Q006｜那是放 POSTTransactionNotification 還是 TransactionNotification
+
+日期：2026-07-27
+
+**你的提問**
+
+那是放 POSTTransactionNotification 還是 TransactionNotification
+
+**當時回答**
+
+放在 `SBO_SP_TransactionNotification`。
+
+因為你的需求是「資料驗證，若表身勾選不一致，就不允許單據過帳」。
+
+- `SBO_SP_TransactionNotification`：交易完成前執行，可以回傳錯誤並阻止新增或更新。
+- `SBO_SP_PostTransactionNotice`：交易完成後才執行，此時單據已經寫入，無法用 `@error` 阻止交易。
+
+請放在 `SBO_SP_TransactionNotification` 裡，並且要位於最後這行之前：
+
+```sql
+SELECT @error, @error_message
+```
+
+結構大致如下：
+
+```sql
+ALTER PROCEDURE [dbo].[SBO_SP_TransactionNotification]
+    @object_type NVARCHAR(30),
+    @transaction_type NCHAR(1),
+    @num_of_cols_in_key INT,
+    @list_of_key_cols_tab_del NVARCHAR(255),
+    @list_of_cols_val_tab_del NVARCHAR(255)
+AS
+BEGIN
+
+    DECLARE @error INT
+    DECLARE @error_message NVARCHAR(200)
+
+    SELECT @error = 0
+    SELECT @error_message = N'Ok'
+
+    -- AP 貸項通知書資料驗證
+    IF @object_type = '19'
+       AND @transaction_type IN ('A', 'U')
+    BEGIN
+        IF EXISTS
+        (
+            SELECT 1
+            FROM RPC1
+            WHERE DocEntry =
+                  CONVERT(INT, @list_of_cols_val_tab_del)
+            GROUP BY DocEntry
+            HAVING COUNT(
+                DISTINCT ISNULL(NoInvtryMv, 'N')
+            ) > 1
+        )
+        BEGIN
+            SET @error = -19001
+            SET @error_message =
+                N'不含數量過帳必須全部勾選或全部不勾選，請檢查表身資料。'
+        END
+    END
+
+    -- 必須放在所有驗證規則的最後
+    SELECT @error, @error_message
+
+END
+```
+
+因此結論是：
+
+```text
+需要擋單及顯示錯誤 → SBO_SP_TransactionNotification
+交易完成後執行其他處理 → SBO_SP_PostTransactionNotice
+```
+
+---
+
+<a id="q7"></a>
+
+## S028-Q007｜過了欸
+
+日期：2026-07-27
+
+**你的提問**
+
+過了欸
+
+**當時回答**
+
+如果「部分勾、部分沒勾」還是可以過帳，先確認資料庫實際存的值，以及 `@error` 是否被後面的程式重設。
+
+先找剛才測試單據的 `DocEntry`，執行：
+
+```sql
+SELECT
+    DocEntry,
+    LineNum,
+    ItemCode,
+    NoInvtryMv
+FROM RPC1
+WHERE DocEntry = 你的DocEntry
+ORDER BY LineNum
+```
+
+如果結果確實同時有 `Y`、`N`，建議把驗證改成更直白的寫法：
+
+```sql
+IF @object_type = '19'
+   AND @transaction_type IN ('A', 'U')
+BEGIN
+    IF EXISTS
+    (
+        SELECT 1
+        FROM RPC1
+        WHERE DocEntry = TRY_CONVERT(INT, @list_of_cols_val_tab_del)
+          AND ISNULL(NoInvtryMv, 'N') = 'Y'
+    )
+    AND EXISTS
+    (
+        SELECT 1
+        FROM RPC1
+        WHERE DocEntry = TRY_CONVERT(INT, @list_of_cols_val_tab_del)
+          AND ISNULL(NoInvtryMv, 'N') <> 'Y'
+    )
+    BEGIN
+        SET @error = -19001
+        SET @error_message =
+            N'不含數量過帳必須全部勾選或全部不勾選，請檢查表身資料。'
+    END
+END
+```
+
+白話邏輯是：
+
+- 找到至少一列 `Y`
+- 同時又找到至少一列不是 `Y`
+- 兩個條件都成立就擋單
+
+另外務必檢查 SP 的後半段。在這段驗證之後，不能再有：
+
+```sql
+SET @error = 0
+SET @error_message = N'Ok'
+```
+
+否則剛設定的錯誤會被清掉。最後只能回傳：
+
+```sql
+SELECT @error, @error_message
+```
+
+你也可以先放一個最簡單的測試，確認 Object Type 及 SP 確實有執行：
+
+```sql
+IF @object_type = '19'
+   AND @transaction_type IN ('A', 'U')
+BEGIN
+    SET @error = -19099
+    SET @error_message = N'AP 貸項通知書測試擋單'
+END
+```
+
+如果這樣仍然能過帳，代表較可能是：
+
+- 修改的不是目前公司資料庫內的 `SBO_SP_TransactionNotification`
+- 程式碼放在 `SELECT @error, @error_message` 之後
+- 後面的程式又把 `@error` 設回 `0`
+- SP 中途有 `RETURN`，尚未執行到這段程式碼
+
+---
+
+<a id="q8"></a>
+
+## S028-Q008｜沒有成功卡到
+
+日期：2026-07-27
+
+**你的提問**
+
+沒有成功卡到
+
+**當時回答**
+
+先不要繼續改判斷式，先確認 `SBO_SP_TransactionNotification` 到底有沒有被執行。SAP 官方資料確認 AP 貸項通知書 Object Type 是 `19`，欄位也確實是 `RPC1.NoInvtryMv`。[SAP SDK：Object Type 19](https://help.sap.com/doc/089315d8d0f8475a9fc84fb919b501a3/10.0/en-US/SDKHelp/SAPbobsCOM~Enumerations~BoAPARDocumentTypes_EN.html)、[SAP SDK：NoInvtryMv](https://help.sap.com/doc/089315d8d0f8475a9fc84fb919b501a3/10.0/en-US/SDKhelp/SAPbobsCOM~Document_Lines~WithoutInventoryMovement.html)
+
+先暫時放這段：
+
+```sql
+IF @object_type = '19'
+BEGIN
+    SET @error = -19099
+    SET @error_message = N'測試：已進入 AP 貸項通知書驗證'
+END
+```
+
+而且必須放在最後：
+
+```sql
+SELECT @error, @error_message
+```
+
+的前面。
+
+再新增一張 AP 貸項通知書。
+
+### 如果測試訊息沒有出現
+
+代表問題不在 `HAVING`，而是 SP 沒有正確執行。請檢查：
+
+1. 是否修改到目前登入公司的資料庫。
+2. 是否修改的是：
+
+```sql
+SBO_SP_TransactionNotification
+```
+
+不是：
+
+```sql
+SBO_SP_PostTransactionNotice
+```
+
+3. 後面是否又出現：
+
+```sql
+SET @error = 0
+SET @error_message = N'Ok'
+```
+
+4. 是否有其他程式在後面覆蓋錯誤。
+5. 最後是否確實有：
+
+```sql
+SELECT @error, @error_message
+```
+
+也可以在目前公司資料庫執行：
+
+```sql
+EXEC sp_helptext 'SBO_SP_TransactionNotification'
+```
+
+確認儲存後的 SP 裡真的有你的程式。
+
+### 如果測試訊息有出現
+
+代表 SP 與 Object Type 正確，接著改用這個較直接的版本：
+
+```sql
+IF @object_type = '19'
+   AND @transaction_type IN ('A', 'U')
+BEGIN
+    DECLARE @DocEntry INT
+
+    SET @DocEntry =
+        TRY_CONVERT(INT, @list_of_cols_val_tab_del)
+
+    IF EXISTS
+    (
+        SELECT 1
+        FROM RPC1
+        WHERE DocEntry = @DocEntry
+          AND ISNULL(NoInvtryMv, 'N') = 'Y'
+    )
+    AND EXISTS
+    (
+        SELECT 1
+        FROM RPC1
+        WHERE DocEntry = @DocEntry
+          AND ISNULL(NoInvtryMv, 'N') = 'N'
+    )
+    BEGIN
+        SET @error = -19001
+        SET @error_message =
+            N'不含數量過帳必須全部勾選或全部不勾選，請檢查表身資料。'
+    END
+END
+```
+
+這段直接判斷同一張單據是否：
+
+- 至少有一列 `Y`
+- 同時至少有一列 `N`
+
+只要兩者同時存在就擋單。
+
+如果你按的是「儲存為草稿」，那又是另一種情況：草稿 Object Type 是 `112`，資料位於草稿表，不會進入上述 `object_type = '19'` 的正式單據驗證。
+
+---
+
+<a id="q9"></a>
+
+## S028-Q009｜還是沒卡到
+
+日期：2026-07-27
+
+**你的提問**
+
+還是沒卡到
+
+**當時回答**
+
+如果連「強制測試擋單」都沒卡到，就可以確定不是 `RPC1` 判斷條件的問題，而是你修改的 SP 沒有被該公司帳套執行，或錯誤被後續程式覆蓋。
+
+請先做最徹底的測試：把下面程式放在 `SBO_SP_TransactionNotification` 最後的 `SELECT @error, @error_message` 正前方，而且暫時不加任何 Object Type 條件：
+
+```sql
+SET @error = -99999
+SET @error_message = N'TransactionNotification 強制測試'
+
+SELECT @error, @error_message
+```
+
+然後隨便新增任何一張單據。
+
+### 如果任何單據都還是能新增
+
+請在你修改 SP 的資料庫執行：
+
+```sql
+SELECT DB_NAME() AS CurrentDatabase
+```
+
+確認它是目前 SAP 登入的公司資料庫，不是：
+
+```text
+SBO-COMMON
+```
+
+再執行：
+
+```sql
+SELECT
+    DB_NAME() AS DatabaseName,
+    OBJECT_SCHEMA_NAME(object_id) AS SchemaName,
+    name
+FROM sys.procedures
+WHERE name = 'SBO_SP_TransactionNotification'
+```
+
+正確應該看到：
+
+```text
+目前公司資料庫 | dbo | SBO_SP_TransactionNotification
+```
+
+接著確認儲存內容：
+
+```sql
+EXEC sp_helptext 'dbo.SBO_SP_TransactionNotification'
+```
+
+搜尋是否真的存在：
+
+```sql
+TransactionNotification 強制測試
+```
+
+常見原因是：
+
+- 改到其他測試帳套的資料庫。
+- 改到 `SBO-COMMON`。
+- 修改後只有執行查詢，沒有成功執行 `ALTER PROCEDURE`。
+- 修改的是 `SBO_SP_PostTransactionNotice`。
+- SP 後方又把 `@error` 設成 `0`。
+- 最後另有一個 `SELECT @error, @error_message`，而強制測試放錯位置。
+
+### 如果強制測試可以擋單
+
+把強制測試刪除，換成以下偵錯程式：
+
+```sql
+IF @transaction_type IN ('A', 'U')
+BEGIN
+    SET @error = -99998
+    SET @error_message =
+        N'ObjectType=' + ISNULL(@object_type, N'NULL')
+        + N', TransType=' + ISNULL(@transaction_type, N'NULL')
+        + N', Key=' + ISNULL(@list_of_cols_val_tab_del, N'NULL')
+END
+```
+
+新增 AP 貸項通知書時，預期會看到類似：
+
+```text
+ObjectType=19, TransType=A, Key=12345
+```
+
+如果你按的是「儲存為草稿」，則看到的通常不是正式 AP 貸項通知書流程，因此 `object_type = '19'` 不會按照預期執行。
+
+最有效的下一步是把完整的 `SBO_SP_TransactionNotification` 貼出來；目前單看驗證片段沒有問題，問題很可能出在 SP 的位置、帳套資料庫或後續覆寫。
+
+---
+
+<a id="q10"></a>
+
+## S028-Q010｜在幫我寫一次
+
+日期：2026-07-27
+
+**你的提問**
+
+在幫我寫一次
+
+**當時回答**
+
+可以，請把以下程式放進公司資料庫的 `SBO_SP_TransactionNotification`，位置要在最後的：
+
+```sql
+SELECT @error, @error_message
+```
+
+之前。
+
+```sql
+/* AP 貸項通知書：
+   表身「不含數量過帳」必須全部勾選或全部不勾選
+*/
+IF @object_type = '19'
+   AND @transaction_type IN ('A', 'U')
+BEGIN
+    DECLARE @APCreditMemoDocEntry INT
+
+    SET @APCreditMemoDocEntry =
+        TRY_CONVERT(INT, @list_of_cols_val_tab_del)
+
+    -- 同一張單據同時存在勾選 Y 與未勾選 N
+    IF EXISTS
+    (
+        SELECT 1
+        FROM dbo.RPC1
+        WHERE DocEntry = @APCreditMemoDocEntry
+          AND ISNULL(NoInvtryMv, 'N') = 'Y'
+    )
+    AND EXISTS
+    (
+        SELECT 1
+        FROM dbo.RPC1
+        WHERE DocEntry = @APCreditMemoDocEntry
+          AND ISNULL(NoInvtryMv, 'N') <> 'Y'
+    )
+    BEGIN
+        SET @error = -19001
+        SET @error_message =
+            N'表身「不含數量過帳」必須全部勾選或全部不勾選。'
+    END
+END
+```
+
+SP 結尾應該長這樣：
+
+```sql
+/* AP 貸項通知書驗證 */
+IF @object_type = '19'
+   AND @transaction_type IN ('A', 'U')
+BEGIN
+    DECLARE @APCreditMemoDocEntry INT
+
+    SET @APCreditMemoDocEntry =
+        TRY_CONVERT(INT, @list_of_cols_val_tab_del)
+
+    IF EXISTS
+    (
+        SELECT 1
+        FROM dbo.RPC1
+        WHERE DocEntry = @APCreditMemoDocEntry
+          AND ISNULL(NoInvtryMv, 'N') = 'Y'
+    )
+    AND EXISTS
+    (
+        SELECT 1
+        FROM dbo.RPC1
+        WHERE DocEntry = @APCreditMemoDocEntry
+          AND ISNULL(NoInvtryMv, 'N') <> 'Y'
+    )
+    BEGIN
+        SET @error = -19001
+        SET @error_message =
+            N'表身「不含數量過帳」必須全部勾選或全部不勾選。'
+    END
+END
+
+-- 這行必須在所有驗證程式最後
+SELECT @error, @error_message
+```
+
+特別注意：
+
+- 請放在公司帳套資料庫，不是 `SBO-COMMON`。
+- 必須是 `SBO_SP_TransactionNotification`。
+- 驗證程式後面不能再有 `SET @error = 0`。
+- 必須測試正式「新增」AP 貸項通知書，不是「儲存為草稿」。
+- 一列 `Y`、一列 `N` 時，就會擋單。
+
+---
+
+<a id="q11"></a>
+
+## S028-Q011｜還是應該是要post?
+
+日期：2026-07-27
+
+**你的提問**
+
+還是應該是要post?
+
+**當時回答**
+
+不是，資料驗證一定要放在 `SBO_SP_TransactionNotification`，不是 `SBO_SP_PostTransactionNotice`。
+
+原因很明確：
+
+- `TransactionNotification`：單據寫入交易中，可用 `@error` 阻止新增。
+- `PostTransactionNotice`：單據已經成功寫入後才執行，無法擋單。
+
+目前「沒有卡到」的原因，很可能是 `TransactionNotification` 執行時，直接查 `RPC1` 尚未取得預期值，或你測試的是尚未新增成功的新單據。可改成一次彙總判斷：
+
+```sql
+IF @object_type = '19'
+   AND @transaction_type IN ('A', 'U')
+BEGIN
+    DECLARE @DocEntry INT
+    DECLARE @CheckedCount INT
+    DECLARE @UncheckedCount INT
+
+    SET @DocEntry =
+        TRY_CONVERT(INT, @list_of_cols_val_tab_del)
+
+    SELECT
+        @CheckedCount =
+            SUM(
+                CASE
+                    WHEN ISNULL(NoInvtryMv, 'N') = 'Y'
+                    THEN 1
+                    ELSE 0
+                END
+            ),
+        @UncheckedCount =
+            SUM(
+                CASE
+                    WHEN ISNULL(NoInvtryMv, 'N') <> 'Y'
+                    THEN 1
+                    ELSE 0
+                END
+            )
+    FROM dbo.RPC1
+    WHERE DocEntry = @DocEntry
+
+    IF ISNULL(@CheckedCount, 0) > 0
+       AND ISNULL(@UncheckedCount, 0) > 0
+    BEGIN
+        SET @error = -19001
+        SET @error_message =
+            N'表身「不含數量過帳」必須全部勾選或全部不勾選。'
+    END
+END
+```
+
+必須放在 SP 最後這行之前：
+
+```sql
+SELECT @error, @error_message
+```
+
+但請先做一個關鍵測試：
+
+```sql
+IF @object_type = '19'
+BEGIN
+    SET @error = -19099
+    SET @error_message =
+        N'已進入 AP 貸項通知書 TransactionNotification'
+END
+```
+
+如果這段都無法阻止正式新增 AP 貸項通知書，換成 `PostTransactionNotice` 也不會解決；這代表目前修改的不是 SAP 正在使用的公司資料庫 SP、程式沒有成功儲存，或者後面把 `@error` 清成 `0`。
+
+`PostTransactionNotice` 最多只能在過帳後記錄問題，不能阻止該單據。
+
+---
+
+<a id="q12"></a>
+
+## S028-Q012｜圖片／附件提問
+
+日期：2026-07-27
+
+**你的提問**
+
+# Files mentioned by the user:
+
+## [2026/7/27 下午 04:53] Nick: USE [WellShin_VN_Test_260428] GO /****** Object: Sto…: C:\Users\nick_yeh\.codex/attachments/2e48ef13-7b37-4337-88c6-29566b5ac5d5/pasted-text.txt
+
+The attached pasted text file(s) contain the user's request. Read and act on that content.
+
+## My request for Codex:
+
+附加文字內容（原提問附檔，未執行）：
+
+````text
+[2026/7/27 下午 04:53] Nick: USE [WellShin_VN_Test_260428]
+GO
+/****** Object:  StoredProcedure [dbo].[SBO_SP_TransactionNotification]    Script Date: 2026/7/27 下午 04:30:19 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER proc [dbo].[SBO_SP_TransactionNotification] 
+
+@object_type nvarchar(30),     -- SBO Object Type
+@transaction_type nchar(1),   -- [A]dd, [U]pdate, [D]elete, [C]ancel, C[L]ose
+@num_of_cols_in_key int,
+@list_of_key_cols_tab_del nvarchar(255),
+@list_of_cols_val_tab_del nvarchar(255)
+
+AS
+
+begin
+
+-- Return values
+declare @error  int    -- Result (0 for no error)
+declare @error_message nvarchar (200)   -- Error string to be displayed
+select @error = 0
+select @error_message = N'Ok'
+
+--------------------------------------------------------------------------------------------------------------------------------
+
+---- ADD YOUR CODE HERE
+
+------------------------------------------------------------------
+---- 銷售訂單 (17) 禁止來源為已過期的報價單
+------------------------------------------------------------------
+--IF (@object_type = '112' AND @transaction_type IN ('A','U'))
+--BEGIN
+
+--    IF EXISTS (
+--        SELECT 1
+--        FROM ODRF H
+--        INNER JOIN DRF1 L ON H.DocEntry = L.DocEntry
+--        INNER JOIN OQUT Q ON Q.DocEntry = L.BaseEntry
+--        WHERE H.DocEntry = @list_of_cols_val_tab_del
+--          AND H.ObjType = '17'         -- 草稿銷售訂單
+--          AND L.BaseType = '23'        -- 來源為銷售報價
+--          AND Q.DocDueDate IS NOT NULL
+--          AND Q.DocDueDate < CAST(GETDATE() AS DATE)
+--    )
+--    BEGIN
+--        SET @error = 1701;
+--        SET @error_message = N'來源銷售報價已超過有效期限，禁止建立銷售訂單。';
+--    END
+--END
+
+
+------------------------------------------------------------------
+---- 規則：
+---- 草稿（112）之 銷售報價(23)
+---- 表頭 U_DeliveryTerm 不可空白
+---- 草稿表：ODRF；文件型別以 ODRF.ObjType 區分
+------------------------------------------------------------------
+
+--IF (@object_type = '112' AND @transaction_type IN ('A','U'))
+--BEGIN
+
+-- IF EXISTS (
+--   SELECT 1 FROM ODRF T0
+--   WHERE T0.DocEntry = @list_of_cols_val_tab_del 
+--    AND T0.ObjType IN ('23') 
+--    AND ISNULL(T0.U_DeliveryTerm, '') = ''    
+--  )
+-- BEGIN
+--  SET @error = '1702'
+--  SET @error_message = N'運送條件為必填欄位!!'
+-- END
+--END
+
+------------------------------------------------------------------
+---- 規則：
+---- 草稿（112）之 銷售訂單(17) 
+---- 表頭 U_DeliveryTerm 、U_Incoterm、TrnspCode不可空白
+---- 草稿表：ODRF；文件型別以 ODRF.ObjType 區分
+------------------------------------------------------------------
+
+--IF (@object_type = '112' AND @transaction_type IN ('A','U'))
+--BEGIN
+
+-- IF EXISTS (
+--   SELECT 1 FROM ODRF T0
+--   WHERE T0.DocEntry = @list_of_cols_val_tab_del 
+--    AND T0.ObjType IN ('17') 
+--    AND ( ISNULL(T0.U_DeliveryTerm, '') = '' 
+--     OR T0.TrnspCode = '-1'
+--     OR ISNULL(T0.U_Incoterm, '') = '' )
+--  )
+-- BEGIN
+--  SET @error = '1703'
+--  SET @error_message = N'運送條件、Incoterm、出貨類型為必填欄位!!'
+-- END
+--END
+
+------------------------------------------------------------------
+---- 規則：
+---- 銷售報價單草稿(23)，檢查明細項目是否限定客戶
+---- 若項目主檔 U_CardCode 有設定，該項目只能被對應客戶使用
+------------------------------------------------------------------
+--IF (@object_type = '112' AND @transaction_type IN ('A','U'))
+--BEGIN
+--    DECLARE @QuoteCardCode NVARCHAR(20)
+--    DECLARE @InvalidItem NVARCHAR(50)
+
+--    -- 取得草稿表頭的客戶代號
+--    SELECT @QuoteCardCode = CardCode
+--    FROM ODRF
+--    WHERE DocEntry = CAST(@list_of_cols_val_tab_del AS INT)
+
+--    -- 檢查明細是否有違規項目
+--    IF EXISTS (
+--        SELECT 1
+--        FROM DRF1 L
+--        INNER JOIN OITM I ON L.ItemCode = I.ItemCode
+--        WHERE L.DocEntry = CAST(@list_of_cols_val_tab_del AS INT)
+--          AND I.U_CardCode IS NOT NULL
+--          AND I.U_CardCode <> @QuoteCardCode
+--    )
+--    BEGIN
+--        SET @error = 2301
+--        SET @error_message = N'明細項目受限於指定客戶，該客戶無法選擇此項目!'
+--    END
+--END
+
+----RMA
+
+--IF @object_type = '16'   -- ORDN (退貨單 / RMA，請依你系統實際 ObjectType 確認)
+--AND @transaction_type IN ('A','U')
+--BEGIN
+--    DECLARE 
+--        @DocEntry INT,
+--        @CustomerID NVARCHAR(50),
+--        @Reason NVARCHAR(50),
+--        @YYMM NVARCHAR(4),
+--        @Prefix NVARCHAR(200),
+--
+[2026/7/27 下午 04:53] Nick: @MaxSeq INT,
+--        @NewSeq NVARCHAR(4),
+--        @NewRMA NVARCHAR(200),
+--        @DocDate DATE;
+
+--    SET @DocEntry = CAST(@list_of_cols_val_tab_del AS INT);
+
+--    /* 1. 取得資料 */
+--    SELECT 
+--        @CustomerID = T0.CardCode,
+--        @DocDate    = T0.DocDate
+--    FROM ORDN T0
+--    WHERE T0.DocEntry = @DocEntry;
+
+--    SELECT TOP 1
+--        @Reason = ISNULL(T1.U_ReturnReason,'NA')
+--    FROM RDN1 T1
+--    WHERE T1.DocEntry = @DocEntry;   -- ⚠ 若實際關聯不是 DocEntry，這裡需調整
+
+--    /* 2. 產生 YYMM */
+--    SET @YYMM = RIGHT(CONVERT(VARCHAR(4),YEAR(@DocDate)),2) 
+--              + RIGHT('0' + CONVERT(VARCHAR(2),MONTH(@DocDate)),2);
+
+--    SET @Prefix = 'RMA-' + @CustomerID + '-' + @Reason + '-' + @YYMM + '-';
+
+--    /* 3. 找同 YYMM 最大流水號 */
+--    SELECT 
+--        @MaxSeq = MAX(CAST(RIGHT(U_RMA,4) AS INT))
+--    FROM ORDN
+--    WHERE U_RMA LIKE @Prefix + '%';
+
+--    IF @MaxSeq IS NULL
+--        SET @MaxSeq = 0;
+
+--    /* 4. 新流水號 */
+--    SET @NewSeq = RIGHT('0000' + CAST(@MaxSeq + 1 AS VARCHAR),4);
+--    SET @NewRMA = @Prefix + @NewSeq;
+
+--    /* 5. 更新 ORDN */
+--    UPDATE ORDN
+--    SET U_RMA = @NewRMA
+--    WHERE DocEntry = @DocEntry;
+--END
+
+------------------------------------------------------------------
+---- 庫存調撥草稿 (112)
+---- 若調撥目的倉庫為 Hub 倉，且已選擇業務夥伴
+---- 則業務夥伴必須是 Hub 客戶
+------------------------------------------------------------------
+--IF (@object_type = '112' AND @transaction_type IN ('A','U'))
+--BEGIN
+--    IF EXISTS (
+--        SELECT 1
+--        FROM ODRF H
+--        INNER JOIN DRF1 L ON H.DocEntry = L.DocEntry
+--        INNER JOIN OWHS W ON W.WhsCode = L.WhsCode
+--        WHERE H.DocEntry = @list_of_cols_val_tab_del
+--          AND H.ObjType = '67'                     -- 草稿內容是庫存調撥
+--          AND ISNULL(W.U_IsHubWh,'N') = 'Y'        -- Hub 倉
+--          AND ISNULL(H.CardCode,'') <> ''         -- 已選業務夥伴
+--          AND NOT EXISTS (                        -- 但不是 Hub 客戶
+--                SELECT 1
+--                FROM OCRD C
+--                WHERE C.CardCode = H.CardCode
+--                  AND ISNULL(C.U_IsHubCust,'N') = 'Y'
+--          )
+--    )
+--    BEGIN
+--        SET @error = 6701
+--        SET @error_message = N'非 Hub 倉客戶，不能調撥到 Hub 倉。'
+--    END
+--END
+
+
+----運送條件卡控--20260114 Tommy新增
+----銷售報價運送條件優先權不可低於原有優先權(數字越大，優先權越低)
+--if @object_type in('112') and (@transaction_type IN('A','U'))
+--if EXISTS 
+--(SELECT 1 FROM ODRF T0 
+--INNER JOIN [dbo].[@DELIVERY_TERM] T1 ON T0.U_DeliveryTerm = T1.Code
+--WHERE T0.[DocEntry] = @list_of_cols_val_tab_del AND T0.ObjType IN ('23') and CAST(T1.U_Deli_rank AS INT) > CAST(T0.U_DeliveryRank AS INT))
+--BEGIN 
+--       SET @error = '2302'
+--       SET @error_message = N'運送條件優先權不可低於原有優先權!!!!'
+--END
+----銷售訂單運送條件優先權不可低於原有優先權(數字越大，優先權越低)
+--if @object_type in('112') and (@transaction_type IN('A','U'))
+--if EXISTS 
+--(SELECT 1 FROM ODRF T0 
+--INNER JOIN [dbo].[@DELIVERY_TERM] T1 ON T0.U_DeliveryTerm = T1.Code
+--WHERE T0.[DocEntry] = @list_of_cols_val_tab_del AND T0.ObjType IN ('17') and  CAST(T1.U_Deli_rank AS INT) > CAST(T0.U_DeliveryRank AS INT))
+--BEGIN 
+--       SET @error = '1704'
+--       SET @error_message = N'運送條件優先權不可低於原有優先權!!!!'
+--END
+
+
+----交貨單運送條件優先權不可低於原有優先權(數字越大，優先權越低)
+--if @object_type in('15') and (@transaction_type IN('A','U'))
+--if EXISTS 
+--(SELECT 1 FROM ODLN T0 
+--INNER JOIN [dbo].[@DELIVERY_TERM] T1 ON T0.U_DeliveryTerm = T1.Code
+--WHERE T0.[DocEntry] = @list_of_cols_val_tab_del and  CAST(T1.U_Deli_rank AS INT) > CAST(T0.U_DeliveryRank AS INT))
+--BEGIN 
+--       SET @error = '1501'
+--       SET @error_message = N'運送條件優先權不可低於原有優先權!!!!'
+--END
+
+----交貨時批次需選擇對應銷售單號批次(批次屬性1)--
+--if @object_type in('15') and (@transaction_type IN('A'))
+--if EXISTS 
+--(SELECT 1 FROM ODLN T0 
+--INNER JOIN DLN1 T1 ON T0.DocEntry = T1.DocEntry
+--INNER JOIN ORDR T2 ON T1.BaseEntry = T2.DocEntry
+--INNER JOIN IBT1 T3 ON T3.BaseEntry = T0.DocEntry AND T3.BaseType = '15'
+--INNER JOIN OIBT T4 ON T3.ItemCode = T4.ItemCode AND T3.BatchNum = T4.BatchNum
+--WHERE T0.[DocEntry] LIKE @list_of_cols_val_tab_del and T2.DocNum != T4.SuppSerial)
+--BEGIN 
+--       SET @error = '1502'
+--       SET
+[2026/7/27 下午 04:53] Nick: @error_message = '批次需選擇指定訂單批次!!!!'
+--END
+----交貨時批次需選擇對應銷售單號批次(批次屬性1)--
+
+------401固定資產主檔欄位必填--
+--if @object_type in('4') and (@transaction_type IN('A','U'))
+--if EXISTS 
+--(SELECT 1 FROM OITM T0 
+--WHERE T0.[ItemCode] LIKE @list_of_cols_val_tab_del 
+--and T0.ItemType = 'F'
+--and ((T0.AssetGroup is null or T0.AssetGroup = '')
+--or (T0.Location is null or T0.Location = '')
+--or (T0.Employee is null or T0.Employee = '')))
+--BEGIN 
+--       SET @error = '401'
+--       SET @error_message = N'固定資產必填欄位未填(資產系類別、存放地點、保管人員)!!!!'
+--END
+
+----固定資產主檔欄位必填--
+
+----交貨時批次需選擇對應銷售單號批次(批次屬性1)--
+--if @object_type in('15') and (@transaction_type IN('A'))
+--if EXISTS 
+--(SELECT 1 FROM ODLN T0 
+--INNER JOIN DLN1 T1 ON T0.DocEntry = T1.DocEntry
+--INNER JOIN ORDR T2 ON T1.BaseEntry = T2.DocEntry
+--INNER JOIN IBT1 T3 ON T3.BaseEntry = T0.DocEntry AND T3.BaseType = '15'
+--INNER JOIN OIBT T4 ON T3.ItemCode = T4.ItemCode AND T3.BatchNum = T4.BatchNum
+--WHERE T0.[DocEntry] LIKE @list_of_cols_val_tab_del and T2.DocNum != T4.SuppSerial)
+--BEGIN 
+--       SET @error = '1502'
+--       SET @error_message = N'批次需選擇指定訂單批次!!!!'
+--END
+----交貨時批次需選擇對應銷售單號批次(批次屬性1)--
+
+----有圖面和SOP才能建立工單--
+--if @object_type in('202') and (@transaction_type IN('A','U'))
+--if EXISTS 
+--(SELECT 1 FROM WOR1 T0 
+--INNER JOIN OWOR T1 ON T1.DocEntry = T0.DocEntry
+--INNER JOIN OITM T2 ON T0.ItemCode = T2.ItemCode
+--INNER JOIN OITM T3 ON T1.ItemCode = T3.ItemCode
+--WHERE T0.[DocEntry] LIKE @list_of_cols_val_tab_del and (T2.AtcEntry IS NULL or T3.AtcEntry IS NULL))
+--BEGIN 
+--    SET @error = '20201'
+--    SET @error_message = N'有圖面和SOP才能建立工單!!!!'
+--END
+----有圖面和SOP才能建立工單--
+
+----項目主檔建立更新紀錄填入--
+--if @object_type in('4') and (@transaction_type IN('A','U'))
+--BEGIN 
+--update T0
+--SET 
+--T0.U_CreateUser = T1.U_NAME,
+--T0.U_CreateDate = T0.CreateDate,
+--T0.U_UpdateUser = T2.U_NAME,
+--T0.U_UpdateDate = T0.UpdateDate
+--FROM OITM T0
+--INNER JOIN OUSR T1 ON T0.UserSign = T1.USERID
+--INNER JOIN OUSR T2 ON T0.UserSign2 = T1.USERID
+--WHERE T0.ItemCode = @list_of_cols_val_tab_del 
+--END
+----項目主檔建立更新紀錄填入--
+----業務夥伴主黨建立更新紀錄填入--
+--if @object_type in('2') and (@transaction_type IN('A','U'))
+--BEGIN 
+--update T0
+--SET 
+--T0.U_CreateUser = T1.U_NAME,
+--T0.U_CreateDate = T0.CreateDate,
+--T0.U_UpdateUser = T2.U_NAME,
+--T0.U_UpdateDate = T0.UpdateDate
+--FROM OCRD T0
+--INNER JOIN OUSR T1 ON T0.UserSign = T1.USERID
+--INNER JOIN OUSR T2 ON T0.UserSign2 = T1.USERID
+--WHERE T0.CardCode = @list_of_cols_val_tab_del 
+--END
+----業務夥伴主檔建立更新紀錄填入--
+
+----交貨時若信用額度不足則不可出貨--
+--if @object_type in('15') and (@transaction_type IN('A'))
+--if EXISTS 
+--(SELECT 1 FROM ODLN T0 
+--INNER JOIN OCRD T1 ON T0.CardCode = T1.CardCode
+--WHERE T0.[DocEntry] LIKE @list_of_cols_val_tab_del 
+--and T1.[CreditLine] - T1.[OrdersBal] - T1.[DNotesBal] - T1.[Balance] < 0)
+--BEGIN 
+--       SET @error = '1502'
+--       SET @error_message = N'信用額度不足則不可出貨!!!!'
+--END
+----交貨時若信用額度不足則不可出貨--
+
+IF @object_type IN ('59') and @transaction_type IN ('A') --生產收貨，新增
+    BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM OIGN T0
+  INNER JOIN IGN1 T1 ON T0.DocEntry = T1.DocEntry
+  INNER JOIN OWOR T2 ON T1.BaseEntry = T2.DocEntry and T1.BaseType = '202'
+  INNER JOIN WOR1 T3 ON T2.DocEntry = T3.DocEntry
+  WHERE T0.DocEntry = @list_of_cols_val_tab_del
+  AND T3.[IssuedQty] < T3.[PlannedQty]
+    )
+    BEGIN
+        SET @error = '9999'
+        SET @error_message = N'未完成生產發貨投料不可進行生產收貨'
+    END
+
+ IF @object_type = '19'
+BEGIN
+    SET @error = -19099
+    SET @error_message =
+        N'已進入 AP 貸項通知書 TransactionNotification'
+END
+
+END
+
+
+
+--------------------------------------------------------------------------------------------------------------------------------
+
+-- Select the return values
+select @error, @error_message
+
+end
+````
+
+
+**當時回答**
+
+找到原因了：你的 AP 貸項通知書驗證被放在 `Object Type = 59` 的區塊裡面。
+
+目前結構相當於：
+
+```sql
+IF @object_type = '59'
+BEGIN
+
+    ...
+
+    IF @object_type = '19'
+    BEGIN
+        ...
+    END
+
+END
+```
+
+同一次交易的 `@object_type` 不可能同時是 `59` 又是 `19`，所以 AP 貸項通知書的驗證永遠不會執行。
+
+請把 SP 最後一段改成下面這樣：
+
+```sql
+------------------------------------------------------------
+-- 生產收貨驗證：Object Type 59
+------------------------------------------------------------
+IF @object_type = '59'
+   AND @transaction_type = 'A'
+BEGIN
+    IF EXISTS
+    (
+        SELECT 1
+        FROM OIGN T0
+        INNER JOIN IGN1 T1
+            ON T0.DocEntry = T1.DocEntry
+        INNER JOIN OWOR T2
+            ON T1.BaseEntry = T2.DocEntry
+           AND T1.BaseType = '202'
+        INNER JOIN WOR1 T3
+            ON T2.DocEntry = T3.DocEntry
+        WHERE T0.DocEntry =
+              TRY_CONVERT(INT, @list_of_cols_val_tab_del)
+          AND T3.IssuedQty < T3.PlannedQty
+    )
+    BEGIN
+        SET @error = 9999
+        SET @error_message = N'生產收貨驗證錯誤'
+    END
+END
+
+
+------------------------------------------------------------
+-- AP 貸項通知書驗證：Object Type 19
+------------------------------------------------------------
+IF @object_type = '19'
+   AND @transaction_type IN ('A', 'U')
+BEGIN
+    IF EXISTS
+    (
+        SELECT 1
+        FROM dbo.RPC1
+        WHERE DocEntry =
+              TRY_CONVERT(INT, @list_of_cols_val_tab_del)
+          AND ISNULL(NoInvtryMv, 'N') = 'Y'
+    )
+    AND EXISTS
+    (
+        SELECT 1
+        FROM dbo.RPC1
+        WHERE DocEntry =
+              TRY_CONVERT(INT, @list_of_cols_val_tab_del)
+          AND ISNULL(NoInvtryMv, 'N') <> 'Y'
+    )
+    BEGIN
+        SET @error = -19001
+        SET @error_message =
+            N'表身「不含數量過帳」必須全部勾選或全部不勾選。'
+    END
+END
+
+
+------------------------------------------------------------
+-- 回傳驗證結果：必須放在最後
+------------------------------------------------------------
+SELECT @error, @error_message
+
+END
+```
+
+重點是這個 `END`：
+
+```sql
+END  -- 先完整結束 Object Type 59
+```
+
+結束之後，才可以開始：
+
+```sql
+IF @object_type = '19'
+```
+
+你原本的 AP 測試程式被包在 `59` 的 `BEGIN...END` 裡，這就是一直沒有卡到的原因。仍然應該使用 `SBO_SP_TransactionNotification`，不需要改到 Post。
+
+---
+
